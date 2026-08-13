@@ -1,20 +1,40 @@
 import { authClient } from "./auth-client";
 import { API_URL } from "./auth-client";
 
+/*
+|--------------------------------------------------------------------------
+| NETWORK ERROR
+|--------------------------------------------------------------------------
+|
+| Dilempar khusus saat fetch() gagal karena TIDAK ADA KONEKSI
+| (bukan karena validasi/error dari server). Ini dipakai layar untuk
+| membedakan "gagal karena jaringan -> fallback ke mode offline"
+| vs "gagal karena validasi -> tampilkan pesan error ke user".
+|
+*/
+
+export class NetworkError extends Error {}
+
 async function request<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
   const cookies = authClient.getCookie();
 
-  const res = await fetch(`${API_URL}/api/v1${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      Cookie: cookies,
-      ...options.headers,
-    },
-  });
+  let res: Response;
+
+  try {
+    res = await fetch(`${API_URL}/api/v1${path}`, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: cookies,
+        ...options.headers,
+      },
+    });
+  } catch {
+    throw new NetworkError("Tidak ada koneksi internet.");
+  }
 
   const json = await res.json();
 
@@ -27,7 +47,7 @@ async function request<T>(
 
 /*
 |--------------------------------------------------------------------------
-| TYPES (disesuaikan dengan db/schema.ts)
+| TYPES
 |--------------------------------------------------------------------------
 */
 
@@ -117,6 +137,19 @@ export interface PayOrderInput {
   paidAmount?: number;
 }
 
+export interface SyncOrderInput {
+  items: CreateOrderItemInput[];
+  discount?: number;
+  tax?: number;
+  notes?: string;
+  paymentMethod: "CASH" | "QRIS";
+  paidAmount: number;
+  changeAmount?: number;
+  createdAt: string;
+  completedAt: string;
+  clientOrderId?: string;
+}
+
 /*
 |--------------------------------------------------------------------------
 | API CLIENT
@@ -128,11 +161,11 @@ export const api = {
   getMenus: () => request<Menu[]>("/menu"),
   getMenuById: (id: string) => request<Menu>(`/menu/${id}`),
 
-  // CATEGORY & VARIANT (untuk halaman admin nanti)
+  // CATEGORY & VARIANT
   getCategories: () => request<Category[]>("/category"),
   getVariants: () => request<Variant[]>("/variant"),
 
-  // ORDERS (pesanan / kasir)
+  // ORDERS (online)
   getPendingOrders: () => request<Order[]>("/orders?status=pending"),
   getCompletedOrders: () => request<Order[]>("/orders?status=completed"),
   getOrderById: (id: string) => request<Order>(`/orders/${id}`),
@@ -155,7 +188,14 @@ export const api = {
       { method: "POST", body: JSON.stringify(body) }
     ),
 
-  // HISTORY (ADMIN only, dipakai di Dashboard)
+  // SYNC (offline -> online)
+  syncOfflineOrder: (body: SyncOrderInput) =>
+    request<{ success: boolean; orderId: string; orderNumber: string; total: number }>(
+      "/orders/sync",
+      { method: "POST", body: JSON.stringify(body) }
+    ),
+
+  // HISTORY
   getHistoryOrders: (page = 1, search?: string) =>
     request<{
       data: Order[];

@@ -14,6 +14,13 @@ import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 
 import { api, type Menu, type Order } from "@/lib/api";
+import {
+  loadMenusWithFallback,
+  getLocalOrders,
+  type LocalOrder,
+} from "@/lib/offline-storage";
+import { syncAllLocalOrders, syncSingleLocalOrder } from "@/lib/sync";
+import { useNetworkStatus } from "@/hooks/use-network-status";
 import { useThemeColors } from "@/hooks/use-theme-colors";
 import { MenuDetailModal } from "@/components/menu/menu-detail-modal";
 
@@ -43,37 +50,45 @@ function getPriceRange(menu: Menu) {
 interface CategorySection {
   title: string;
   categoryId: string;
-  data: Menu[][]; // dibungkus array supaya renderItem cuma dipanggil 1x per section (grid custom)
+  data: Menu[][];
 }
 
 export default function MenuScreen() {
   const colors = useThemeColors();
   const router = useRouter();
+  const { isOnline } = useNetworkStatus();
 
   const [menus, setMenus] = useState<Menu[]>([]);
+  const [menuOffline, setMenuOffline] = useState(false);
   const [pendingOrders, setPendingOrders] = useState<Order[]>([]);
+  const [localOrders, setLocalOrders] = useState<LocalOrder[]>([]);
+
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [selectedMenu, setSelectedMenu] = useState<Menu | null>(null);
 
   const load = useCallback(async () => {
-    try {
-      const [menuData, pendingData] = await Promise.all([
-        api.getMenus(),
-        api.getPendingOrders(),
-      ]);
+    const { menus: menuData, offline } = await loadMenusWithFallback();
+    setMenus(menuData);
+    setMenuOffline(offline);
 
-      setMenus(menuData);
-      setPendingOrders(pendingData);
-    } catch (err) {
-      Alert.alert(
-        "Gagal memuat data",
-        err instanceof Error ? err.message : "Terjadi kesalahan"
-      );
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
+    try {
+      const pending = await api.getPendingOrders();
+      setPendingOrders(pending);
+    } catch {
+      setPendingOrders([]);
     }
+
+    try {
+      const local = await getLocalOrders();
+      setLocalOrders(local);
+    } catch {
+      setLocalOrders([]);
+    }
+
+    setLoading(false);
+    setRefreshing(false);
   }, []);
 
   useEffect(() => {
@@ -91,6 +106,74 @@ export default function MenuScreen() {
 
   function handleLanjutkanPesanan(orderId: string) {
     router.push(`/pesanan?orderId=${orderId}`);
+  }
+
+  /*
+  |--------------------------------------------------------------------------
+  | SYNC HANDLERS
+  |--------------------------------------------------------------------------
+  */
+
+  const unsyncedLocalOrders = useMemo(
+    () => localOrders.filter((o) => o.status === "COMPLETED" && !o.synced),
+    [localOrders]
+  );
+
+  const localPendingOrders = useMemo(
+    () => localOrders.filter((o) => o.status === "PENDING"),
+    [localOrders]
+  );
+
+  async function handleSyncAll() {
+    setSyncing(true);
+    const result = await syncAllLocalOrders();
+    setSyncing(false);
+    await load();
+
+    if (result.syncedCount === 0 && result.failedCount === 0) {
+      return;
+    }
+
+    if (result.failedCount === 0) {
+      Alert.alert(
+        "Sinkronisasi Berhasil",
+        `${result.syncedCount} pesanan berhasil disinkronkan ke server.`
+      );
+    } else {
+      Alert.alert(
+        "Sinkronisasi Sebagian Berhasil",
+        `${result.syncedCount} berhasil, ${result.failedCount} gagal.\n\n` +
+          result.errors.map((e) => `${e.orderNumber}: ${e.message}`).join("\n")
+      );
+    }
+  }
+
+  function handleTapUnsyncedOrder(order: LocalOrder) {
+    Alert.alert(
+      order.orderNumber,
+      `Total: ${formatCurrency(order.total)}\n` +
+        `Dibayar: ${formatCurrency(order.paidAmount)} (${order.paymentMethod})\n` +
+        `Kembalian: ${formatCurrency(order.changeAmount)}\n\n` +
+        `Pesanan ini sudah dibayar secara offline dan menunggu disinkronkan ke server.`,
+      [
+        { text: "Tutup", style: "cancel" },
+        {
+          text: "Sync Sekarang",
+          onPress: async () => {
+            setSyncing(true);
+            const result = await syncSingleLocalOrder(order.localId);
+            setSyncing(false);
+            await load();
+
+            if (result.success) {
+              Alert.alert("Berhasil", "Pesanan berhasil disinkronkan.");
+            } else {
+              Alert.alert("Gagal", result.error ?? "Gagal sinkronisasi.");
+            }
+          },
+        },
+      ]
+    );
   }
 
   /*
@@ -144,23 +227,40 @@ export default function MenuScreen() {
           <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
         }
         ListHeaderComponent={
-          <View style={styles.pageHeader}>
-            <View>
-              <Text style={[styles.headerTitle, { color: colors.text }]}>Menu</Text>
-              <Text style={[styles.headerSubtitle, { color: colors.subtext }]}>
-                {menus.filter((m) => m.available).length} menu tersedia
-              </Text>
-            </View>
+          <View>
+            {(!isOnline || menuOffline) && (
+              <View
+                style={[
+                  styles.offlineBanner,
+                  { backgroundColor: "#fef3c7", borderColor: "#f59e0b" },
+                ]}
+              >
+                <Ionicons name="cloud-offline-outline" size={16} color="#b45309" />
+                <Text style={styles.offlineBannerText}>
+                  Mode offline — menampilkan data tersimpan. Pesanan baru akan
+                  disimpan di perangkat ini.
+                </Text>
+              </View>
+            )}
 
-            <TouchableOpacity
-              style={[styles.createOrderBtn, { backgroundColor: colors.primary }]}
-              onPress={handleBuatPesanan}
-            >
-              <Ionicons name="add-circle-outline" size={18} color={colors.bg} />
-              <Text style={[styles.createOrderText, { color: colors.bg }]}>
-                Buat Pesanan
-              </Text>
-            </TouchableOpacity>
+            <View style={styles.pageHeader}>
+              <View>
+                <Text style={[styles.headerTitle, { color: colors.text }]}>Menu</Text>
+                <Text style={[styles.headerSubtitle, { color: colors.subtext }]}>
+                  {menus.filter((m) => m.available).length} menu tersedia
+                </Text>
+              </View>
+
+              <TouchableOpacity
+                style={[styles.createOrderBtn, { backgroundColor: colors.primary }]}
+                onPress={handleBuatPesanan}
+              >
+                <Ionicons name="add-circle-outline" size={18} color={colors.bg} />
+                <Text style={[styles.createOrderText, { color: colors.bg }]}>
+                  Buat Pesanan
+                </Text>
+              </TouchableOpacity>
+            </View>
           </View>
         }
         renderSectionHeader={({ section }) => (
@@ -246,14 +346,39 @@ export default function MenuScreen() {
         }
         ListFooterComponent={
           <View style={styles.pendingSection}>
-            <Text style={[styles.sectionTitle, { color: colors.text }]}>
-              Pesanan Pending
-            </Text>
-            <Text style={[styles.pendingSubtitle, { color: colors.subtext }]}>
-              Selesaikan pembayaran untuk pesanan yang belum lunas.
-            </Text>
+            <View style={styles.pendingHeader}>
+              <View>
+                <Text style={[styles.sectionTitleFooter, { color: colors.text }]}>
+                  Pesanan Pending
+                </Text>
+                <Text style={[styles.pendingSubtitle, { color: colors.subtext }]}>
+                  Selesaikan pembayaran untuk pesanan yang belum lunas.
+                </Text>
+              </View>
 
-            {pendingOrders.length === 0 ? (
+              {unsyncedLocalOrders.length > 0 && (
+                <TouchableOpacity
+                  style={[styles.syncBtn, { backgroundColor: colors.primary }]}
+                  onPress={handleSyncAll}
+                  disabled={syncing}
+                >
+                  {syncing ? (
+                    <ActivityIndicator color={colors.bg} size="small" />
+                  ) : (
+                    <>
+                      <Ionicons name="sync-outline" size={15} color={colors.bg} />
+                      <Text style={styles.syncBtnText}>
+                        Sync ({unsyncedLocalOrders.length})
+                      </Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              )}
+            </View>
+
+            {pendingOrders.length === 0 &&
+            localPendingOrders.length === 0 &&
+            unsyncedLocalOrders.length === 0 ? (
               <View
                 style={[
                   styles.emptyPending,
@@ -265,34 +390,105 @@ export default function MenuScreen() {
                 </Text>
               </View>
             ) : (
-              pendingOrders.map((order) => (
-                <TouchableOpacity
-                  key={order.id}
-                  style={[
-                    styles.pendingRow,
-                    { backgroundColor: colors.card, borderColor: colors.border },
-                  ]}
-                  onPress={() => handleLanjutkanPesanan(order.id)}
-                >
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ color: colors.text, fontWeight: "600" }}>
-                      {order.orderNumber}
-                    </Text>
-                    <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 2 }}>
-                      {order.items.length} item • {order.user?.name}
-                    </Text>
-                  </View>
+              <>
+                {/* Server pending orders */}
+                {pendingOrders.map((order) => (
+                  <TouchableOpacity
+                    key={`server-${order.id}`}
+                    style={[
+                      styles.pendingRow,
+                      { backgroundColor: colors.card, borderColor: colors.border },
+                    ]}
+                    onPress={() => handleLanjutkanPesanan(order.id)}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ color: colors.text, fontWeight: "600" }}>
+                        {order.orderNumber}
+                      </Text>
+                      <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 2 }}>
+                        {order.items.length} item • {order.user?.name}
+                      </Text>
+                    </View>
 
-                  <View style={{ alignItems: "flex-end" }}>
-                    <Text style={{ color: colors.text, fontWeight: "700" }}>
-                      {formatCurrency(order.total)}
-                    </Text>
-                    <Text style={{ color: colors.primary, fontSize: 12, marginTop: 2 }}>
-                      Bayar →
-                    </Text>
-                  </View>
-                </TouchableOpacity>
-              ))
+                    <View style={{ alignItems: "flex-end" }}>
+                      <Text style={{ color: colors.text, fontWeight: "700" }}>
+                        {formatCurrency(order.total)}
+                      </Text>
+                      <Text style={{ color: colors.primary, fontSize: 12, marginTop: 2 }}>
+                        Bayar →
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                ))}
+
+                {/* Local pending orders (offline, belum dibayar) */}
+                {localPendingOrders.map((order) => (
+                  <TouchableOpacity
+                    key={`local-pending-${order.localId}`}
+                    style={[
+                      styles.pendingRow,
+                      { backgroundColor: colors.card, borderColor: "#f59e0b" },
+                    ]}
+                    onPress={() => handleLanjutkanPesanan(order.localId)}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                        <Text style={{ color: colors.text, fontWeight: "600" }}>
+                          {order.orderNumber}
+                        </Text>
+                        <View style={styles.offlineTag}>
+                          <Text style={styles.offlineTagText}>OFFLINE</Text>
+                        </View>
+                      </View>
+                      <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 2 }}>
+                        {order.items.length} item
+                      </Text>
+                    </View>
+
+                    <View style={{ alignItems: "flex-end" }}>
+                      <Text style={{ color: colors.text, fontWeight: "700" }}>
+                        {formatCurrency(order.total)}
+                      </Text>
+                      <Text style={{ color: "#f59e0b", fontSize: 12, marginTop: 2 }}>
+                        Bayar →
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                ))}
+
+                {/* Local completed, belum sync */}
+                {unsyncedLocalOrders.map((order) => (
+                  <TouchableOpacity
+                    key={`local-unsynced-${order.localId}`}
+                    style={[
+                      styles.pendingRow,
+                      { backgroundColor: colors.card, borderColor: "#16a34a" },
+                    ]}
+                    onPress={() => handleTapUnsyncedOrder(order)}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                        <Text style={{ color: colors.text, fontWeight: "600" }}>
+                          {order.orderNumber}
+                        </Text>
+                        <View style={[styles.offlineTag, { backgroundColor: "#16a34a" }]}>
+                          <Text style={styles.offlineTagText}>MENUNGGU SYNC</Text>
+                        </View>
+                      </View>
+                      <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 2 }}>
+                        Sudah dibayar • {order.items.length} item
+                      </Text>
+                    </View>
+
+                    <View style={{ alignItems: "flex-end" }}>
+                      <Text style={{ color: colors.text, fontWeight: "700" }}>
+                        {formatCurrency(order.total)}
+                      </Text>
+                      <Ionicons name="cloud-upload-outline" size={16} color="#16a34a" />
+                    </View>
+                  </TouchableOpacity>
+                ))}
+              </>
             )}
           </View>
         }
@@ -311,6 +507,16 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   center: { flex: 1, justifyContent: "center", alignItems: "center" },
   listContent: { paddingBottom: 32 },
+  offlineBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
+    borderRadius: 10,
+    marginHorizontal: 16,
+    marginTop: 12,
+    padding: 10,
+  },
+  offlineBannerText: { color: "#b45309", fontSize: 12, marginLeft: 8, flex: 1, lineHeight: 16 },
   pageHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -370,12 +576,28 @@ const styles = StyleSheet.create({
     paddingHorizontal: 7,
     paddingVertical: 3,
   },
-  badgeText: { color: "#fff", fontSize: 10, fontWeight: "700" },
+  badgeText: { color: "#000", fontSize: 10, fontWeight: "700" },
   menuBody: { padding: 12, gap: 4 },
   menuName: { fontSize: 14, fontWeight: "700", lineHeight: 18 },
   menuPrice: { fontSize: 13, fontWeight: "700" },
   pendingSection: { marginTop: 24, paddingHorizontal: 16 },
-  pendingSubtitle: { fontSize: 12, marginTop: 2, marginBottom: 12 },
+  pendingHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    marginBottom: 12,
+  },
+  sectionTitleFooter: { fontSize: 16, fontWeight: "700" },
+  pendingSubtitle: { fontSize: 12, marginTop: 2 },
+  syncBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+  syncBtnText: { color: "#000", fontSize: 12, fontWeight: "700" },
   emptyPending: {
     borderWidth: 1,
     borderRadius: 12,
@@ -391,4 +613,11 @@ const styles = StyleSheet.create({
     padding: 14,
     marginBottom: 10,
   },
+  offlineTag: {
+    backgroundColor: "#f59e0b",
+    borderRadius: 4,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+  },
+  offlineTagText: { color: "#fff", fontSize: 9, fontWeight: "800" },
 });
