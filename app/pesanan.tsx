@@ -31,6 +31,7 @@ import {
 import { useNetworkStatus } from "@/hooks/use-network-status";
 import { API_URL } from "@/lib/auth-client";
 import { useThemeColors } from "@/hooks/use-theme-colors";
+import { addAwaitingReceipt } from "@/lib/struk/awaiting-receipt-storage";
 
 function formatCurrency(v: number) {
   return new Intl.NumberFormat("id-ID", {
@@ -55,16 +56,6 @@ interface CartItem {
 }
 
 type CartMap = Record<string, CartItem>;
-
-/*
-|--------------------------------------------------------------------------
-| WORKING ORDER
-|--------------------------------------------------------------------------
-|
-| Bentuk pesanan yang sedang diedit, dinormalisasi supaya UI tidak perlu
-| tahu apakah asalnya dari SERVER (Order) atau LOCAL STORAGE (LocalOrder).
-|
-*/
 
 interface WorkingOrder {
   id: string; // id server ATAU localId (berprefix "local_")
@@ -606,6 +597,17 @@ export default function PesananScreen() {
 
     setPaying(true);
 
+    /*
+    |--------------------------------------------------------------------------
+    | PESANAN OFFLINE (LOCAL)
+    |--------------------------------------------------------------------------
+    |
+    | Statusnya diubah jadi COMPLETED di AsyncStorage lokal, TETAP muncul
+    | di daftar "unsyncedLocalOrders" sampai disinkronkan -- jadi otomatis
+    | tidak hilang. Struk bisa dicetak kapan saja dari sana.
+    |
+    */
+
     if (existingOrder.isLocal) {
       try {
         const nowIso = new Date().toISOString();
@@ -625,7 +627,7 @@ export default function PesananScreen() {
 
         Alert.alert(
           "Pembayaran Tersimpan (Offline)",
-          `Kembalian: ${formatCurrency(changeAmount)}\n\nPesanan akan masuk ke History setelah kamu sinkronkan.`,
+          `Kembalian: ${formatCurrency(changeAmount)}\n\nPesanan tetap ada di perangkat ini. Kamu bisa mencetak struk kapan saja dari Menu, sebelum atau sesudah sinkronisasi.`,
           [{ text: "OK", onPress: () => router.replace("/") }]
         );
       } catch {
@@ -635,6 +637,16 @@ export default function PesananScreen() {
       return;
     }
 
+    /*
+    |--------------------------------------------------------------------------
+    | PESANAN ONLINE (SERVER)
+    |--------------------------------------------------------------------------
+    |
+    | Setelah dibayar, order-nya disimpan ke "awaiting receipt" storage
+    | supaya TETAP muncul di Pesanan Pending sampai struknya dicetak.
+    |
+    */
+
     try {
       if (payMethod === "CASH") {
         const result = await api.payOrder(existingOrder.id, {
@@ -642,21 +654,29 @@ export default function PesananScreen() {
           paidAmount,
         });
 
+        const paidOrder = await api.getOrderById(existingOrder.id);
+        await addAwaitingReceipt(paidOrder);
+
         setPayModalVisible(false);
 
         Alert.alert(
           "Pembayaran Berhasil",
-          `Kembalian: ${formatCurrency(result.changeAmount ?? 0)}`,
+          `Kembalian: ${formatCurrency(result.changeAmount ?? 0)}\n\nStruk belum dicetak. Cetak dari Menu > Pesanan Pending.`,
           [{ text: "OK", onPress: () => router.replace("/") }]
         );
       } else {
         await api.payOrder(existingOrder.id, { method: "QRIS" });
 
+        const paidOrder = await api.getOrderById(existingOrder.id);
+        await addAwaitingReceipt(paidOrder);
+
         setPayModalVisible(false);
 
-        Alert.alert("Berhasil", "Pembayaran QRIS berhasil dikonfirmasi.", [
-          { text: "OK", onPress: () => router.replace("/") },
-        ]);
+        Alert.alert(
+          "Berhasil",
+          "Pembayaran QRIS berhasil dikonfirmasi.\n\nStruk belum dicetak. Cetak dari Menu > Pesanan Pending.",
+          [{ text: "OK", onPress: () => router.replace("/") }]
+        );
       }
     } catch (err) {
       Alert.alert(
