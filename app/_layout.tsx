@@ -1,24 +1,102 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
-import { Stack } from 'expo-router';
-import { StatusBar } from 'expo-status-bar';
-import 'react-native-reanimated';
+import { useCallback, useEffect } from "react";
+import { Stack, useRouter, useSegments } from "expo-router";
+import { View, ActivityIndicator, Platform } from "react-native";
+import { StatusBar } from "expo-status-bar";
+import * as NavigationBar from "expo-navigation-bar";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 
-import { useColorScheme } from '@/hooks/use-color-scheme';
-
-export const unstable_settings = {
-  anchor: '(tabs)',
-};
+import { authClient } from "@/lib/auth-client";
+import { useThemeColors } from "@/hooks/use-theme-colors";
 
 export default function RootLayout() {
-  const colorScheme = useColorScheme();
+  const { data: session, isPending } = authClient.useSession();
+  const segments = useSegments();
+  const router = useRouter();
+  const colors = useThemeColors();
+
+  /*
+  |--------------------------------------------------------------------------
+  | IMMERSIVE MODE (Android, edge-to-edge safe)
+  |--------------------------------------------------------------------------
+  |
+  | Android 15+ (targetSdk 35+) mewajibkan edge-to-edge, sehingga API lama
+  | NavigationBar.setBehaviorAsync() (mode "immersive sticky") TIDAK
+  | didukung lagi -- makanya kita tidak memanggilnya sama sekali.
+  |
+  | Cukup NavigationBar.setVisibilityAsync("hidden") -- di mode edge-to-edge
+  | ini otomatis menyembunyikan status bar & navigation bar sekaligus
+  | (dianggap satu kesatuan "system bars").
+  |
+  | Karena behavior sticky tidak bisa diatur, kita simulasikan manual:
+  | begitu user swipe dan system bar muncul sementara, kita sembunyikan
+  | lagi otomatis setelah beberapa detik.
+  |
+  */
+
+  const hideSystemBars = useCallback(() => {
+    if (Platform.OS !== "android") return;
+    NavigationBar.setVisibilityAsync("hidden");
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS !== "android") return;
+
+    hideSystemBars();
+
+    const subscription = NavigationBar.addVisibilityListener(({ visibility }) => {
+      if (visibility === "visible") {
+        setTimeout(hideSystemBars, 2000);
+      }
+    });
+
+    return () => subscription.remove();
+  }, [hideSystemBars]);
+
+  useEffect(() => {
+    if (isPending) return;
+
+    const inAuthScreen = segments[0] === "login";
+
+    if (!session && !inAuthScreen) {
+      router.replace("/(auth)/login");
+    } else if (session && inAuthScreen) {
+      router.replace("/");
+    }
+  }, [session, isPending, segments, router]);
+
+  if (isPending) {
+    return (
+      <SafeAreaProvider>
+        <View
+          style={{
+            flex: 1,
+            justifyContent: "center",
+            alignItems: "center",
+            backgroundColor: colors.bg,
+          }}
+        >
+          <ActivityIndicator color={colors.primary} />
+        </View>
+      </SafeAreaProvider>
+    );
+  }
 
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
+    <SafeAreaProvider>
+      <StatusBar hidden style="auto" />
+
+      <Stack screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="login" />
+        <Stack.Screen
+          name="pesanan"
+          options={{
+            presentation: "modal",
+            animation: "slide_from_bottom",
+          }}
+        />
+        <Stack.Screen name="change-password" />
       </Stack>
-      <StatusBar style="auto" />
-    </ThemeProvider>
+    </SafeAreaProvider>
   );
 }

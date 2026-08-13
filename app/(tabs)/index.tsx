@@ -1,98 +1,394 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  View,
+  Text,
+  SectionList,
+  Image,
+  TouchableOpacity,
+  StyleSheet,
+  RefreshControl,
+  ActivityIndicator,
+  Alert,
+} from "react-native";
+import { useRouter } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
 
-import { HelloWave } from '@/components/hello-wave';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
+import { api, type Menu, type Order } from "@/lib/api";
+import { useThemeColors } from "@/hooks/use-theme-colors";
+import { MenuDetailModal } from "@/components/menu/menu-detail-modal";
 
-export default function HomeScreen() {
+function formatCurrency(v: number) {
+  return new Intl.NumberFormat("id-ID", {
+    style: "currency",
+    currency: "IDR",
+    maximumFractionDigits: 0,
+  }).format(v || 0);
+}
+
+function getPriceRange(menu: Menu) {
+  const activePrices = menu.menuVariants
+    .filter((v) => v.available)
+    .map((v) => v.price);
+
+  if (activePrices.length === 0) return null;
+
+  const min = Math.min(...activePrices);
+  const max = Math.max(...activePrices);
+
+  return min === max
+    ? formatCurrency(min)
+    : `${formatCurrency(min)} - ${formatCurrency(max)}`;
+}
+
+interface CategorySection {
+  title: string;
+  categoryId: string;
+  data: Menu[][]; // dibungkus array supaya renderItem cuma dipanggil 1x per section (grid custom)
+}
+
+export default function MenuScreen() {
+  const colors = useThemeColors();
+  const router = useRouter();
+
+  const [menus, setMenus] = useState<Menu[]>([]);
+  const [pendingOrders, setPendingOrders] = useState<Order[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [selectedMenu, setSelectedMenu] = useState<Menu | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [menuData, pendingData] = await Promise.all([
+        api.getMenus(),
+        api.getPendingOrders(),
+      ]);
+
+      setMenus(menuData);
+      setPendingOrders(pendingData);
+    } catch (err) {
+      Alert.alert(
+        "Gagal memuat data",
+        err instanceof Error ? err.message : "Terjadi kesalahan"
+      );
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  function handleRefresh() {
+    setRefreshing(true);
+    load();
+  }
+
+  function handleBuatPesanan() {
+    router.push("/pesanan");
+  }
+
+  function handleLanjutkanPesanan(orderId: string) {
+    router.push(`/pesanan?orderId=${orderId}`);
+  }
+
+  /*
+  |--------------------------------------------------------------------------
+  | GROUP MENU PER CATEGORY
+  |--------------------------------------------------------------------------
+  */
+
+  const sections = useMemo<CategorySection[]>(() => {
+    const availableMenus = menus.filter((m) => m.available);
+    const groups = new Map<string, CategorySection>();
+
+    for (const menu of availableMenus) {
+      const categoryId = menu.category?.id ?? "uncategorized";
+      const categoryName = menu.category?.name ?? "Lainnya";
+
+      const existing = groups.get(categoryId);
+
+      if (existing) {
+        existing.data[0].push(menu);
+      } else {
+        groups.set(categoryId, {
+          title: categoryName,
+          categoryId,
+          data: [[menu]],
+        });
+      }
+    }
+
+    return Array.from(groups.values()).sort((a, b) =>
+      a.title.localeCompare(b.title)
+    );
+  }, [menus]);
+
+  if (loading) {
+    return (
+      <View style={[styles.center, { backgroundColor: colors.bg }]}>
+        <ActivityIndicator color={colors.primary} />
+      </View>
+    );
+  }
+
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
+    <View style={[styles.container, { backgroundColor: colors.bg }]}>
+      <SectionList
+        sections={sections}
+        keyExtractor={(_, index) => `section-row-${index}`}
+        stickySectionHeadersEnabled
+        contentContainerStyle={styles.listContent}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
+        }
+        ListHeaderComponent={
+          <View style={styles.pageHeader}>
+            <View>
+              <Text style={[styles.headerTitle, { color: colors.text }]}>Menu</Text>
+              <Text style={[styles.headerSubtitle, { color: colors.subtext }]}>
+                {menus.filter((m) => m.available).length} menu tersedia
+              </Text>
+            </View>
 
-        <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+            <TouchableOpacity
+              style={[styles.createOrderBtn, { backgroundColor: colors.primary }]}
+              onPress={handleBuatPesanan}
+            >
+              <Ionicons name="add-circle-outline" size={18} color={colors.bg} />
+              <Text style={[styles.createOrderText, { color: colors.bg }]}>
+                Buat Pesanan
+              </Text>
+            </TouchableOpacity>
+          </View>
+        }
+        renderSectionHeader={({ section }) => (
+          <View style={[styles.sectionHeader, { backgroundColor: colors.bg }]}>
+            <View style={[styles.sectionDot, { backgroundColor: colors.primary }]} />
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>
+              {section.title}
+            </Text>
+            <Text style={[styles.sectionCount, { color: colors.subtext }]}>
+              {section.data[0].length} item
+            </Text>
+          </View>
+        )}
+        renderItem={({ item: menusInCategory }) => (
+          <View style={styles.grid}>
+            {menusInCategory.map((menu) => {
+              const priceRange = getPriceRange(menu);
+              const hasActiveVariant = menu.menuVariants.some((v) => v.available);
+
+              return (
+                <TouchableOpacity
+                  key={menu.id}
+                  activeOpacity={0.8}
+                  style={[
+                    styles.menuCard,
+                    { backgroundColor: colors.card, borderColor: colors.border },
+                  ]}
+                  onPress={() => setSelectedMenu(menu)}
+                >
+                  <View style={styles.imageWrapper}>
+                    {menu.imageUrl ? (
+                      <Image source={{ uri: menu.imageUrl }} style={styles.menuImage} />
+                    ) : (
+                      <View
+                        style={[
+                          styles.menuImage,
+                          styles.menuImagePlaceholder,
+                          { backgroundColor: colors.bg },
+                        ]}
+                      >
+                        <Ionicons
+                          name="fast-food-outline"
+                          size={26}
+                          color={colors.subtext}
+                        />
+                      </View>
+                    )}
+
+                    {!hasActiveVariant && (
+                      <View style={[styles.badge, { backgroundColor: colors.danger }]}>
+                        <Text style={styles.badgeText}>Habis</Text>
+                      </View>
+                    )}
+                  </View>
+
+                  <View style={styles.menuBody}>
+                    <Text
+                      style={[styles.menuName, { color: colors.text }]}
+                      numberOfLines={2}
+                    >
+                      {menu.name}
+                    </Text>
+
+                    {priceRange ? (
+                      <Text style={[styles.menuPrice, { color: colors.primary }]}>
+                        {priceRange}
+                      </Text>
+                    ) : (
+                      <Text style={[styles.menuPrice, { color: colors.danger }]}>
+                        Belum ada harga
+                      </Text>
+                    )}
+                  </View>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
+        ListEmptyComponent={
+          <Text style={{ color: colors.subtext, textAlign: "center", marginTop: 40 }}>
+            Belum ada menu tersedia.
+          </Text>
+        }
+        ListFooterComponent={
+          <View style={styles.pendingSection}>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>
+              Pesanan Pending
+            </Text>
+            <Text style={[styles.pendingSubtitle, { color: colors.subtext }]}>
+              Selesaikan pembayaran untuk pesanan yang belum lunas.
+            </Text>
+
+            {pendingOrders.length === 0 ? (
+              <View
+                style={[
+                  styles.emptyPending,
+                  { borderColor: colors.border, backgroundColor: colors.card },
+                ]}
+              >
+                <Text style={{ color: colors.subtext }}>
+                  Tidak ada pesanan pending.
+                </Text>
+              </View>
+            ) : (
+              pendingOrders.map((order) => (
+                <TouchableOpacity
+                  key={order.id}
+                  style={[
+                    styles.pendingRow,
+                    { backgroundColor: colors.card, borderColor: colors.border },
+                  ]}
+                  onPress={() => handleLanjutkanPesanan(order.id)}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: colors.text, fontWeight: "600" }}>
+                      {order.orderNumber}
+                    </Text>
+                    <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 2 }}>
+                      {order.items.length} item • {order.user?.name}
+                    </Text>
+                  </View>
+
+                  <View style={{ alignItems: "flex-end" }}>
+                    <Text style={{ color: colors.text, fontWeight: "700" }}>
+                      {formatCurrency(order.total)}
+                    </Text>
+                    <Text style={{ color: colors.primary, fontSize: 12, marginTop: 2 }}>
+                      Bayar →
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+              ))
+            )}
+          </View>
+        }
+      />
+
+      <MenuDetailModal
+        menu={selectedMenu}
+        visible={!!selectedMenu}
+        onClose={() => setSelectedMenu(null)}
+      />
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  titleContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  stepContainer: {
-    gap: 8,
+  container: { flex: 1 },
+  center: { flex: 1, justifyContent: "center", alignItems: "center" },
+  listContent: { paddingBottom: 32 },
+  pageHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingTop: 16,
     marginBottom: 8,
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
+  headerTitle: { fontSize: 24, fontWeight: "700" },
+  headerSubtitle: { fontSize: 13, marginTop: 2 },
+  createOrderBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+  },
+  createOrderText: { fontWeight: "600", fontSize: 13 },
+  sectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingTop: 18,
+    paddingBottom: 10,
+    gap: 8,
+  },
+  sectionDot: { width: 6, height: 6, borderRadius: 3 },
+  sectionTitle: { fontSize: 16, fontWeight: "700", flex: 1 },
+  sectionCount: { fontSize: 12 },
+  grid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    paddingHorizontal: 12,
+    gap: 12,
+  },
+  menuCard: {
+    width: "47%",
+    borderWidth: 1,
+    borderRadius: 16,
+    overflow: "hidden",
+    marginBottom: 4,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 6,
+    elevation: 1,
+  },
+  imageWrapper: { position: "relative" },
+  menuImage: { width: "100%", height: 120 },
+  menuImagePlaceholder: { justifyContent: "center", alignItems: "center" },
+  badge: {
+    position: "absolute",
+    top: 8,
+    right: 8,
+    borderRadius: 6,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+  },
+  badgeText: { color: "#fff", fontSize: 10, fontWeight: "700" },
+  menuBody: { padding: 12, gap: 4 },
+  menuName: { fontSize: 14, fontWeight: "700", lineHeight: 18 },
+  menuPrice: { fontSize: 13, fontWeight: "700" },
+  pendingSection: { marginTop: 24, paddingHorizontal: 16 },
+  pendingSubtitle: { fontSize: 12, marginTop: 2, marginBottom: 12 },
+  emptyPending: {
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 16,
+    alignItems: "center",
+  },
+  pendingRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 10,
   },
 });
