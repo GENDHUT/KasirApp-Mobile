@@ -22,6 +22,8 @@ import { PrintReceiptModal } from "@/components/struk/print-receipt-modal";
 import { toReceiptOrder } from "@/lib/struk/receipt-mapper";
 import { type ReceiptOrder } from "@/lib/struk/receipt-types";
 
+const PAGE_SIZE = 10;
+
 function formatCurrency(v: number) {
   return new Intl.NumberFormat("id-ID", {
     style: "currency",
@@ -62,6 +64,12 @@ export default function DashboardScreen() {
   const [search, setSearch] = useState("");
 
   const [myOrders, setMyOrders] = useState<Order[]>([]);
+
+  // ---------------------------------------------------------------------------
+  // PAGINATION
+  // ---------------------------------------------------------------------------
+
+  const [page, setPage] = useState(1);
 
   // ---------------------------------------------------------------------------
   // PRINT / REPRINT STRUK
@@ -117,6 +125,7 @@ export default function DashboardScreen() {
   }, [load]);
 
   function handleRefresh() {
+    setPage(1);
     setRefreshing(true);
     load();
   }
@@ -147,6 +156,46 @@ export default function DashboardScreen() {
       normalize(order.orderNumber).includes(keyword)
     );
   }, [myOrders, search]);
+
+  function handleChangeSearch(value: string) {
+    setSearch(value);
+    setPage(1);
+  }
+
+  // ---------------------------------------------------------------------------
+  // PAGINATION
+  // ---------------------------------------------------------------------------
+
+  const totalPages = Math.max(
+    1,
+    Math.ceil(filteredOrders.length / PAGE_SIZE)
+  );
+
+  // Jaga-jaga: kalau halaman aktif jadi tidak valid (mis. setelah refresh
+  // data berkurang), kembalikan ke halaman terakhir yang valid.
+  useEffect(() => {
+    if (page > totalPages) {
+      setPage(totalPages);
+    }
+  }, [page, totalPages]);
+
+  const paginatedOrders = useMemo(() => {
+    const start = (page - 1) * PAGE_SIZE;
+    return filteredOrders.slice(start, start + PAGE_SIZE);
+  }, [filteredOrders, page]);
+
+  const rangeStart =
+    filteredOrders.length === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
+
+  const rangeEnd = Math.min(page * PAGE_SIZE, filteredOrders.length);
+
+  function goToPrevPage() {
+    setPage((p) => Math.max(1, p - 1));
+  }
+
+  function goToNextPage() {
+    setPage((p) => Math.min(totalPages, p + 1));
+  }
 
   // ---------------------------------------------------------------------------
   // ACCOUNT
@@ -653,7 +702,7 @@ export default function DashboardScreen() {
             placeholder="Cari nomor pesanan..."
             placeholderTextColor={colors.subtext}
             value={search}
-            onChangeText={setSearch}
+            onChangeText={handleChangeSearch}
             style={[
               styles.searchInput,
               {
@@ -666,7 +715,7 @@ export default function DashboardScreen() {
           {search.length > 0 && (
             <TouchableOpacity
               activeOpacity={0.7}
-              onPress={() => setSearch("")}
+              onPress={() => handleChangeSearch("")}
             >
               <Ionicons
                 name="close-circle"
@@ -731,173 +780,254 @@ export default function DashboardScreen() {
             </Text>
           </View>
         ) : (
-          /* ============================================================ */
-          /* HISTORY LIST */
-          /* ============================================================ */
+          <>
+            {/* ============================================================ */}
+            {/* HISTORY LIST (SATU HALAMAN SAJA) */}
+            {/* ============================================================ */}
 
-          <View style={styles.historyList}>
-            {filteredOrders.map((order) => {
-              const paymentIcon =
-                order.paymentMethod === "QRIS"
-                  ? "qr-code-outline"
-                  : "cash-outline";
+            <View style={styles.historyList}>
+              {paginatedOrders.map((order) => {
+                const paymentIcon =
+                  order.paymentMethod === "QRIS"
+                    ? "qr-code-outline"
+                    : "cash-outline";
 
-              const orderDate = order.completedAt
-                ? formatDate(order.completedAt)
-                : formatDate(order.createdAt);
+                const orderDate = order.completedAt
+                  ? formatDate(order.completedAt)
+                  : formatDate(order.createdAt);
 
-              return (
-                <TouchableOpacity
-                  key={order.id}
-                  activeOpacity={0.75}
-                  onPress={() => handleOpenPrint(order)}
-                  style={[
-                    styles.historyRow,
-                    {
-                      backgroundColor: colors.card,
-                      borderColor: colors.border,
-                    },
-                  ]}
-                >
-                  {/* LEFT */}
-                  <View style={styles.historyMain}>
-                    <View style={styles.orderNumberRow}>
+                return (
+                  <TouchableOpacity
+                    key={order.id}
+                    activeOpacity={0.75}
+                    onPress={() => handleOpenPrint(order)}
+                    style={[
+                      styles.historyRow,
+                      {
+                        backgroundColor: colors.card,
+                        borderColor: colors.border,
+                      },
+                    ]}
+                  >
+                    {/* LEFT */}
+                    <View style={styles.historyMain}>
+                      <View style={styles.orderNumberRow}>
+                        <Text
+                          numberOfLines={1}
+                          style={[
+                            styles.orderNumber,
+                            {
+                              color: colors.text,
+                            },
+                          ]}
+                        >
+                          {order.orderNumber}
+                        </Text>
+
+                        <View
+                          style={[
+                            styles.statusPill,
+                            {
+                              backgroundColor: "#16a34a",
+                            },
+                          ]}
+                        >
+                          <View style={styles.statusDot} />
+
+                          <Text style={styles.statusPillText}>
+                            SELESAI
+                          </Text>
+                        </View>
+                      </View>
+
+                      <View style={styles.historyMeta}>
+                        <View style={styles.metaItem}>
+                          <Ionicons
+                            name="time-outline"
+                            size={12}
+                            color={colors.subtext}
+                          />
+
+                          <Text
+                            numberOfLines={1}
+                            style={[
+                              styles.metaText,
+                              {
+                                color: colors.subtext,
+                              },
+                            ]}
+                          >
+                            {orderDate}
+                          </Text>
+                        </View>
+
+                        <View style={styles.metaItem}>
+                          <Ionicons
+                            name={paymentIcon}
+                            size={12}
+                            color={colors.subtext}
+                          />
+
+                          <Text
+                            numberOfLines={1}
+                            style={[
+                              styles.metaText,
+                              {
+                                color: colors.subtext,
+                              },
+                            ]}
+                          >
+                            {order.paymentMethod ?? "-"}
+                          </Text>
+                        </View>
+
+                        <View style={styles.metaItem}>
+                          <Ionicons
+                            name="cube-outline"
+                            size={12}
+                            color={colors.subtext}
+                          />
+
+                          <Text
+                            numberOfLines={1}
+                            style={[
+                              styles.metaText,
+                              {
+                                color: colors.subtext,
+                              },
+                            ]}
+                          >
+                            {order.items.length} item
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+
+                    {/* RIGHT */}
+                    <View style={styles.historyRight}>
                       <Text
                         numberOfLines={1}
+                        adjustsFontSizeToFit
                         style={[
-                          styles.orderNumber,
+                          styles.historyTotal,
                           {
                             color: colors.text,
                           },
                         ]}
                       >
-                        {order.orderNumber}
+                        {formatCurrency(order.total)}
                       </Text>
 
-                      <View
-                        style={[
-                          styles.statusPill,
-                          {
-                            backgroundColor: "#16a34a",
-                          },
-                        ]}
-                      >
-                        <View style={styles.statusDot} />
+                      <View style={styles.printRow}>
+                        <Ionicons
+                          name="print-outline"
+                          size={12}
+                          color={colors.primary}
+                        />
 
-                        <Text style={styles.statusPillText}>
-                          SELESAI
+                        <Text
+                          style={[
+                            styles.printText,
+                            {
+                              color: colors.primary,
+                            },
+                          ]}
+                        >
+                          Cetak
                         </Text>
                       </View>
                     </View>
 
-                    <View style={styles.historyMeta}>
-                      <View style={styles.metaItem}>
-                        <Ionicons
-                          name="time-outline"
-                          size={12}
-                          color={colors.subtext}
-                        />
+                    <Ionicons
+                      name="chevron-forward"
+                      size={15}
+                      color={colors.subtext}
+                      style={styles.chevron}
+                    />
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
 
-                        <Text
-                          numberOfLines={1}
-                          style={[
-                            styles.metaText,
-                            {
-                              color: colors.subtext,
-                            },
-                          ]}
-                        >
-                          {orderDate}
-                        </Text>
-                      </View>
+            {/* ============================================================ */}
+            {/* PAGINATION */}
+            {/* ============================================================ */}
 
-                      <View style={styles.metaItem}>
-                        <Ionicons
-                          name={paymentIcon}
-                          size={12}
-                          color={colors.subtext}
-                        />
+            {filteredOrders.length > PAGE_SIZE && (
+              <View style={styles.paginationWrapper}>
+                <Text
+                  style={[
+                    styles.paginationInfo,
+                    { color: colors.subtext },
+                  ]}
+                >
+                  Menampilkan {rangeStart}-{rangeEnd} dari{" "}
+                  {filteredOrders.length} transaksi
+                </Text>
 
-                        <Text
-                          numberOfLines={1}
-                          style={[
-                            styles.metaText,
-                            {
-                              color: colors.subtext,
-                            },
-                          ]}
-                        >
-                          {order.paymentMethod ?? "-"}
-                        </Text>
-                      </View>
+                <View style={styles.paginationRow}>
+                  <TouchableOpacity
+                    activeOpacity={0.7}
+                    onPress={goToPrevPage}
+                    disabled={page === 1}
+                    style={[
+                      styles.pageBtn,
+                      {
+                        borderColor: colors.border,
+                        backgroundColor: colors.card,
+                        opacity: page === 1 ? 0.4 : 1,
+                      },
+                    ]}
+                  >
+                    <Ionicons
+                      name="chevron-back"
+                      size={16}
+                      color={colors.text}
+                    />
+                  </TouchableOpacity>
 
-                      <View style={styles.metaItem}>
-                        <Ionicons
-                          name="cube-outline"
-                          size={12}
-                          color={colors.subtext}
-                        />
-
-                        <Text
-                          numberOfLines={1}
-                          style={[
-                            styles.metaText,
-                            {
-                              color: colors.subtext,
-                            },
-                          ]}
-                        >
-                          {order.items.length} item
-                        </Text>
-                      </View>
-                    </View>
-                  </View>
-
-                  {/* RIGHT */}
-                  <View style={styles.historyRight}>
+                  <View
+                    style={[
+                      styles.pageIndicator,
+                      {
+                        borderColor: colors.border,
+                        backgroundColor: colors.card,
+                      },
+                    ]}
+                  >
                     <Text
-                      numberOfLines={1}
-                      adjustsFontSizeToFit
                       style={[
-                        styles.historyTotal,
-                        {
-                          color: colors.text,
-                        },
+                        styles.pageIndicatorText,
+                        { color: colors.text },
                       ]}
                     >
-                      {formatCurrency(order.total)}
+                      {page} / {totalPages}
                     </Text>
-
-                    <View style={styles.printRow}>
-                      <Ionicons
-                        name="print-outline"
-                        size={12}
-                        color={colors.primary}
-                      />
-
-                      <Text
-                        style={[
-                          styles.printText,
-                          {
-                            color: colors.primary,
-                          },
-                        ]}
-                      >
-                        Cetak
-                      </Text>
-                    </View>
                   </View>
 
-                  <Ionicons
-                    name="chevron-forward"
-                    size={15}
-                    color={colors.subtext}
-                    style={styles.chevron}
-                  />
-                </TouchableOpacity>
-              );
-            })}
-          </View>
+                  <TouchableOpacity
+                    activeOpacity={0.7}
+                    onPress={goToNextPage}
+                    disabled={page === totalPages}
+                    style={[
+                      styles.pageBtn,
+                      {
+                        borderColor: colors.border,
+                        backgroundColor: colors.card,
+                        opacity: page === totalPages ? 0.4 : 1,
+                      },
+                    ]}
+                  >
+                    <Ionicons
+                      name="chevron-forward"
+                      size={16}
+                      color={colors.text}
+                    />
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+          </>
         )}
       </ScrollView>
 
@@ -1259,6 +1389,50 @@ const styles = StyleSheet.create({
 
   chevron: {
     marginLeft: 6,
+  },
+
+  // --------------------------------------------------------------------------
+  // PAGINATION
+  // --------------------------------------------------------------------------
+
+  paginationWrapper: {
+    marginTop: 14,
+    alignItems: "center",
+    gap: 8,
+  },
+
+  paginationInfo: {
+    fontSize: 11,
+  },
+
+  paginationRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+
+  pageBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 9,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  pageIndicator: {
+    minWidth: 64,
+    height: 36,
+    borderRadius: 9,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 10,
+  },
+
+  pageIndicatorText: {
+    fontSize: 12,
+    fontWeight: "700",
   },
 
   // --------------------------------------------------------------------------

@@ -84,7 +84,6 @@ export default function RootLayout() {
   return (
     <SafeAreaProvider>
       <StatusBar hidden style="auto" />
-
       <Stack screenOptions={{ headerShown: false }}>
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="login" />

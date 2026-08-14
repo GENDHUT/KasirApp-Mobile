@@ -2,9 +2,9 @@
   "expo": {
     "name": "kasirapp",
     "slug": "kasirapp",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "portrait",
-    "icon": "./assets/images/Logo.png",
+    "icon": "./assets/images/icon",
     "scheme": "kasirapp",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
@@ -57,7 +57,8 @@
           ],
           "bluetoothAlwaysPermission": "Aplikasi ini butuh akses Bluetooth untuk mencetak struk."
         }
-      ]
+      ],
+      "expo-asset"
     ],
     "experiments": {
       "typedRoutes": true,

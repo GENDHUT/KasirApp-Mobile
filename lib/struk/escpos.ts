@@ -1,101 +1,43 @@
-import {
-  ReceiptOrder,
-  STORE_INFO,
-  formatCurrency,
-  formatReceiptDate,
-  getPaymentMethodLabel,
-} from "./receipt-types";
+import { ReceiptOrder, STORE_INFO, formatCurrency, formatReceiptDate, getPaymentMethodLabel } from "./receipt-types";
+import { type LogoRaster } from "./logo-raster";
 
 /*
 |--------------------------------------------------------------------------
 | ESC/POS RECEIPT BUILDER
 |--------------------------------------------------------------------------
-|
-| Untuk:
-| - Expo
-| - React Native
-| - Bluetooth Thermal Printer
-| - Printer 58mm
-|
-| Tidak menggunakan:
-| - DOM
-| - Canvas
-| - Browser API
-|
-| Output:
-| Uint8Array
-|
+| Expo / React Native -- Bluetooth Thermal Printer 58mm. Output: Uint8Array
 |--------------------------------------------------------------------------
 */
 
 const LINE_WIDTH = 32;
-
 const ESC = 0x1b;
 const GS = 0x1d;
 const LF = 0x0a;
 
-/*
-|--------------------------------------------------------------------------
-| ESC/POS COMMANDS
-|--------------------------------------------------------------------------
-*/
-
 const CMD = {
   INIT: [ESC, 0x40],
-
+  SELECT_CODEPAGE_PC437: [ESC, 0x74, 0x00],
   ALIGN_LEFT: [ESC, 0x61, 0x00],
   ALIGN_CENTER: [ESC, 0x61, 0x01],
   ALIGN_RIGHT: [ESC, 0x61, 0x02],
-
   BOLD_ON: [ESC, 0x45, 0x01],
   BOLD_OFF: [ESC, 0x45, 0x00],
-
-  /*
-   * GS ! n
-   *
-   * 0x00 = normal
-   * 0x11 = double width + double height
-   */
   NORMAL_SIZE: [GS, 0x21, 0x00],
   DOUBLE_SIZE: [GS, 0x21, 0x11],
-
+  RASTER_IMAGE_PREFIX: [GS, 0x76, 0x30, 0x00], // GS v 0 -> 1D 76 30 m xL xH yL yH data...
   FEED_LINE: [LF],
-
-  /*
-   * Full cut.
-   *
-   * Tidak semua printer mendukung command ini.
-   */
   CUT: [GS, 0x56, 0x00],
 };
 
-/*
-|--------------------------------------------------------------------------
-| TEXT ENCODING
-|--------------------------------------------------------------------------
-*/
-
-/**
- * Encode text untuk printer thermal.
- *
- * Banyak printer thermal murah menggunakan single-byte
- * encoding/codepage, bukan UTF-8.
- *
- * Karena itu untuk tahap aman kita gunakan karakter ASCII.
- *
- * Karakter di luar 0-255 akan diganti dengan "?".
- */
 function encodeText(text: string): number[] {
   const result: number[] = [];
 
   for (const char of text) {
-    const code = char.charCodeAt(0);
+    let code = char.charCodeAt(0);
 
-    if (code >= 0 && code <= 255) {
-      result.push(code);
-    } else {
-      result.push(0x3f); // ?
-    }
+    if (code === 0xa0) code = 0x20; // NBSP -> spasi biasa (fix garbled di printer)
+
+    result.push(code >= 0 && code <= 255 ? code : 0x3f);
   }
 
   return result;
@@ -110,182 +52,88 @@ function encodeText(text: string): number[] {
 class ReceiptBuilder {
   private bytes: number[] = [];
 
-  /**
-   * Tambahkan raw ESC/POS command.
-   *
-   * Public karena buildReceiptEscPos() membutuhkan command
-   * INIT dan CUT.
-   */
   push(command: number[]) {
     this.bytes.push(...command);
+    return this;
+  }
+
+  pushRaw(bytes: Uint8Array) {
+    for (let i = 0; i < bytes.length; i++) this.bytes.push(bytes[i]);
+    return this;
+  }
+
+  rasterImage(raster: LogoRaster) {
+    const { widthBytes, height, data } = raster;
+
+    this.push([...CMD.RASTER_IMAGE_PREFIX, widthBytes & 0xff, (widthBytes >> 8) & 0xff, height & 0xff, (height >> 8) & 0xff]);
+    this.pushRaw(data);
 
     return this;
   }
 
-  /**
-   * Tambahkan text tanpa line feed.
-   */
   text(value: string) {
     this.bytes.push(...encodeText(value));
-
     return this;
   }
 
-  /**
-   * Tambahkan text + newline.
-   */
   line(value = "") {
     this.text(value);
     this.push(CMD.FEED_LINE);
-
     return this;
   }
 
-  /**
-   * Align kiri.
-   */
-  left() {
-    this.push(CMD.ALIGN_LEFT);
+  left() { this.push(CMD.ALIGN_LEFT); return this; }
+  center() { this.push(CMD.ALIGN_CENTER); return this; }
+  right() { this.push(CMD.ALIGN_RIGHT); return this; }
 
-    return this;
-  }
+  bold(enabled: boolean) { this.push(enabled ? CMD.BOLD_ON : CMD.BOLD_OFF); return this; }
+  big(enabled: boolean) { this.push(enabled ? CMD.DOUBLE_SIZE : CMD.NORMAL_SIZE); return this; }
 
-  /**
-   * Align tengah.
-   */
-  center() {
-    this.push(CMD.ALIGN_CENTER);
-
-    return this;
-  }
-
-  /**
-   * Align kanan.
-   */
-  right() {
-    this.push(CMD.ALIGN_RIGHT);
-
-    return this;
-  }
-
-  /**
-   * Bold.
-   */
-  bold(enabled: boolean) {
-    this.push(
-      enabled
-        ? CMD.BOLD_ON
-        : CMD.BOLD_OFF
-    );
-
-    return this;
-  }
-
-  /**
-   * Ukuran text normal / double.
-   */
-  big(enabled: boolean) {
-    this.push(
-      enabled
-        ? CMD.DOUBLE_SIZE
-        : CMD.NORMAL_SIZE
-    );
-
-    return this;
-  }
-
-  /**
-   * Garis horizontal.
-   */
   dashedLine() {
     this.left();
     this.line("-".repeat(LINE_WIDTH));
-
     return this;
   }
 
-  /**
-   * Membuat row:
-   *
-   * Total                 Rp20.000
-   */
   row(label: string, value: string) {
     const safeLabel = String(label ?? "");
     const safeValue = String(value ?? "");
 
-    /*
-     * Jika value terlalu panjang,
-     * jangan sampai melebihi lebar printer.
-     */
     if (safeValue.length >= LINE_WIDTH) {
       this.line(safeLabel);
       this.rightAligned(safeValue);
-
       return this;
     }
 
-    const maxLabelLength =
-      LINE_WIDTH - safeValue.length - 1;
-
+    const maxLabelLength = LINE_WIDTH - safeValue.length - 1;
     let clippedLabel = safeLabel;
 
     if (clippedLabel.length > maxLabelLength) {
-      clippedLabel =
-        maxLabelLength > 1
-          ? clippedLabel.slice(0, maxLabelLength - 1) + "."
-          : clippedLabel.slice(0, maxLabelLength);
+      clippedLabel = maxLabelLength > 1
+        ? clippedLabel.slice(0, maxLabelLength - 1) + "."
+        : clippedLabel.slice(0, maxLabelLength);
     }
 
-    const spaces = Math.max(
-      1,
-      LINE_WIDTH -
-        clippedLabel.length -
-        safeValue.length
-    );
-
-    this.line(
-      clippedLabel +
-        " ".repeat(spaces) +
-        safeValue
-    );
+    const spaces = Math.max(1, LINE_WIDTH - clippedLabel.length - safeValue.length);
+    this.line(clippedLabel + " ".repeat(spaces) + safeValue);
 
     return this;
   }
 
-  /**
-   * Text rata kanan.
-   */
   rightAligned(value: string) {
     const safeValue = String(value ?? "");
 
     if (safeValue.length >= LINE_WIDTH) {
       this.line(safeValue.slice(0, LINE_WIDTH));
-
       return this;
     }
 
-    const spaces =
-      LINE_WIDTH - safeValue.length;
-
-    this.line(
-      " ".repeat(Math.max(0, spaces)) +
-        safeValue
-    );
+    const spaces = LINE_WIDTH - safeValue.length;
+    this.line(" ".repeat(Math.max(0, spaces)) + safeValue);
 
     return this;
   }
 
-  /**
-   * Wrap text ke beberapa baris.
-   *
-   * Mendukung:
-   *
-   * "Ayam Geprek Super Pedas"
-   *
-   * menjadi:
-   *
-   * Ayam Geprek Super Pedas
-   */
   wrapped(value: string) {
     const text = String(value ?? "").trim();
 
@@ -294,45 +142,24 @@ class ReceiptBuilder {
       return this;
     }
 
-    /*
-     * Pecah berdasarkan whitespace.
-     */
     const words = text.split(/\s+/);
-
     let current = "";
 
     for (const word of words) {
-      /*
-       * Kalau satu kata saja lebih panjang
-       * dari LINE_WIDTH, pecah paksa.
-       */
       if (word.length > LINE_WIDTH) {
         if (current) {
           this.line(current);
           current = "";
         }
 
-        for (
-          let i = 0;
-          i < word.length;
-          i += LINE_WIDTH
-        ) {
-          this.line(
-            word.slice(i, i + LINE_WIDTH)
-          );
-        }
+        for (let i = 0; i < word.length; i += LINE_WIDTH) this.line(word.slice(i, i + LINE_WIDTH));
 
         continue;
       }
 
-      const candidate = current
-        ? `${current} ${word}`
-        : word;
+      const candidate = current ? `${current} ${word}` : word;
 
-      if (
-        candidate.length > LINE_WIDTH &&
-        current
-      ) {
+      if (candidate.length > LINE_WIDTH && current) {
         this.line(current);
         current = word;
       } else {
@@ -340,16 +167,11 @@ class ReceiptBuilder {
       }
     }
 
-    if (current) {
-      this.line(current);
-    }
+    if (current) this.line(current);
 
     return this;
   }
 
-  /**
-   * Ambil hasil akhir sebagai Uint8Array.
-   */
   raw(): Uint8Array {
     return Uint8Array.from(this.bytes);
   }
@@ -361,284 +183,81 @@ class ReceiptBuilder {
 |--------------------------------------------------------------------------
 */
 
-/**
- * Mengubah ReceiptOrder menjadi data ESC/POS.
- *
- * @param order data pesanan
- * @returns Uint8Array siap dikirim ke printer
- */
-export function buildReceiptEscPos(
-  order: ReceiptOrder
-): Uint8Array {
+export interface BuildReceiptOptions {
+  /** Tampilkan logo. Default: true. */
+  includeLogo?: boolean;
+  /** Bitmap logo hasil dari logo-raster.ts. */
+  logoRaster?: LogoRaster | null;
+}
+
+export function buildReceiptEscPos(order: ReceiptOrder, options: BuildReceiptOptions = {}): Uint8Array {
+  const { includeLogo = true, logoRaster = null } = options;
   const b = new ReceiptBuilder();
 
-  /*
-  |--------------------------------------------------------------------------
-  | INIT PRINTER
-  |--------------------------------------------------------------------------
-  */
+  // INIT
+  b.push(CMD.INIT).push(CMD.SELECT_CODEPAGE_PC437).push(CMD.NORMAL_SIZE);
 
-  b.push(CMD.INIT);
-  b.push(CMD.NORMAL_SIZE);
-
-  /*
-  |--------------------------------------------------------------------------
-  | HEADER TOKO
-  |--------------------------------------------------------------------------
-  */
-
+  // HEADER -- logo (kalau ada) selalu paling atas, baru nama toko
   b.center();
 
+  if (includeLogo && logoRaster) {
+    b.rasterImage(logoRaster).line();
+    b.big(false).bold(false);
+  }
+
   b.bold(true);
-  b.big(true);
+  b.big(includeLogo && logoRaster ? false : includeLogo); // tanpa logo, nama toko dibuat lebih besar
+  b.line(STORE_INFO.name.toUpperCase());
+  b.big(false).bold(false);
 
-  b.line(
-    STORE_INFO.name.toUpperCase()
-  );
-
-  b.big(false);
-  b.bold(false);
-
-  /*
-  |--------------------------------------------------------------------------
-  | STORE INFORMATION
-  |--------------------------------------------------------------------------
-  */
-
-  if (STORE_INFO.address) {
-    b.wrapped(STORE_INFO.address);
-  }
-
-  if (STORE_INFO.phone) {
-    b.wrapped(STORE_INFO.phone);
-  }
-
-  if (STORE_INFO.instagram) {
-    b.wrapped(
-      `Instagram: ${STORE_INFO.instagram}`
-    );
-  }
-
+  if (STORE_INFO.address) b.wrapped(STORE_INFO.address);
+  if (STORE_INFO.phone) b.wrapped(STORE_INFO.phone);
+  if (STORE_INFO.instagram) b.wrapped(`Instagram: ${STORE_INFO.instagram}`);
   b.line();
 
-  /*
-  |--------------------------------------------------------------------------
-  | ORDER META
-  |--------------------------------------------------------------------------
-  */
-
+  // ORDER META
+  b.dashedLine().left();
+  b.row("No", order.orderNumber || "-");
+  b.row("Tanggal", formatReceiptDate(order.completedAt));
+  b.row("Kasir", order.cashierName || "-");
+  b.row("Pembayaran", getPaymentMethodLabel(order.paymentMethod));
   b.dashedLine();
 
-  b.left();
-
-  b.row(
-    "No",
-    order.orderNumber || "-"
-  );
-
-  b.row(
-    "Tanggal",
-    formatReceiptDate(
-      order.completedAt
-    )
-  );
-
-  b.row(
-    "Kasir",
-    order.cashierName || "-"
-  );
-
-  b.row(
-    "Pembayaran",
-    getPaymentMethodLabel(
-      order.paymentMethod
-    )
-  );
-
-  b.dashedLine();
-
-  /*
-  |--------------------------------------------------------------------------
-  | ORDER ITEMS
-  |--------------------------------------------------------------------------
-  */
-
+  // ITEMS
   for (const item of order.items) {
-    const itemName =
-      item.variantName &&
-      item.variantName.trim().length > 0
-        ? `${item.menuName} (${item.variantName})`
-        : item.menuName;
+    const itemName = item.variantName && item.variantName.trim().length > 0
+      ? `${item.menuName} (${item.variantName})`
+      : item.menuName;
 
-    /*
-     * Nama menu
-     */
-    b.bold(true);
-    b.wrapped(itemName);
-    b.bold(false);
-
-    /*
-     * Harga x quantity
-     *
-     * Contoh:
-     *
-     * Rp10.000 x2              Rp20.000
-     */
-    const quantityText =
-      `${formatCurrency(item.unitPrice)} x${item.quantity}`;
-
-    b.row(
-      quantityText,
-      formatCurrency(item.subtotal)
-    );
+    b.bold(true).wrapped(itemName).bold(false);
+    b.row(`${formatCurrency(item.unitPrice)} x${item.quantity}`, formatCurrency(item.subtotal));
   }
 
-  /*
-  |--------------------------------------------------------------------------
-  | TOTAL
-  |--------------------------------------------------------------------------
-  */
-
+  // TOTAL
   b.dashedLine();
+  b.row("Subtotal", formatCurrency(order.subtotal));
+  if (order.discount > 0) b.row("Diskon", `-${formatCurrency(order.discount)}`);
+  if (order.tax > 0) b.row("Pajak", formatCurrency(order.tax));
 
-  b.row(
-    "Subtotal",
-    formatCurrency(order.subtotal)
-  );
+  b.bold(true).row("TOTAL", formatCurrency(order.total)).bold(false);
 
-  /*
-   * Discount
-   */
-  if (order.discount > 0) {
-    b.row(
-      "Diskon",
-      `-${formatCurrency(order.discount)}`
-    );
-  }
+  b.row("Bayar", formatCurrency(order.paidAmount));
+  if (order.changeAmount > 0) b.row("Kembali", formatCurrency(order.changeAmount));
 
-  /*
-   * Tax
-   */
-  if (order.tax > 0) {
-    b.row(
-      "Pajak",
-      formatCurrency(order.tax)
-    );
-  }
-
-  /*
-  |--------------------------------------------------------------------------
-  | GRAND TOTAL
-  |--------------------------------------------------------------------------
-  */
-
-  b.bold(true);
-
-  b.row(
-    "TOTAL",
-    formatCurrency(order.total)
-  );
-
-  b.bold(false);
-
-  /*
-  |--------------------------------------------------------------------------
-  | PAYMENT
-  |--------------------------------------------------------------------------
-  */
-
-  b.row(
-    "Bayar",
-    formatCurrency(order.paidAmount)
-  );
-
-  /*
-   * Kembalian hanya ditampilkan kalau > 0.
-   */
-  if (order.changeAmount > 0) {
-    b.row(
-      "Kembali",
-      formatCurrency(
-        order.changeAmount
-      )
-    );
-  }
-
-  /*
-  |--------------------------------------------------------------------------
-  | NOTES
-  |--------------------------------------------------------------------------
-  */
-
-  if (
-    order.notes &&
-    order.notes.trim().length > 0
-  ) {
+  // NOTES
+  if (order.notes && order.notes.trim().length > 0) {
     b.dashedLine();
-
-    b.bold(true);
-    b.line("Catatan");
-    b.bold(false);
-
+    b.bold(true).line("Catatan").bold(false);
     b.wrapped(order.notes);
   }
 
-  /*
-  |--------------------------------------------------------------------------
-  | FOOTER
-  |--------------------------------------------------------------------------
-  */
+  // FOOTER
+  b.dashedLine().center();
+  b.bold(true).wrapped(STORE_INFO.footerNote).bold(false);
 
-  b.dashedLine();
-
-  b.center();
-
-  b.bold(true);
-
-  b.wrapped(
-    STORE_INFO.footerNote
-  );
-
-  b.bold(false);
-
-  b.line();
-
-  /*
-  |--------------------------------------------------------------------------
-  | PAPER FEED
-  |--------------------------------------------------------------------------
-  |
-  | Feed beberapa baris supaya struk tidak terlalu dekat
-  | dengan cutter.
-  |
-  */
-
-  b.line();
-  b.line();
-  b.line();
-
-  /*
-  |--------------------------------------------------------------------------
-  | CUT PAPER
-  |--------------------------------------------------------------------------
-  |
-  | PERHATIAN:
-  | Tidak semua printer 58mm mempunyai auto cutter.
-  |
-  | Jika printer kamu tidak mempunyai cutter atau printer
-  | mengalami masalah setelah command ini, hapus:
-  |
-  | b.push(CMD.CUT);
-  |
-  */
-
+  // FEED + CUT
+  b.line().line().line().line();
   b.push(CMD.CUT);
-
-  /*
-  |--------------------------------------------------------------------------
-  | RETURN BYTES
-  |--------------------------------------------------------------------------
-  */
 
   return b.raw();
 }
