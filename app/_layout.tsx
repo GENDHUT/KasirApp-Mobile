@@ -7,6 +7,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { authClient } from "@/lib/auth-client";
 import { useThemeColors } from "@/hooks/use-theme-colors";
+import { requestBlePermissions } from "@/lib/struk/thermal-printer";
 
 export default function RootLayout() {
   const { data: session, isPending } = authClient.useSession();
@@ -63,6 +64,26 @@ export default function RootLayout() {
       router.replace("/");
     }
   }, [session, isPending, segments, router]);
+
+  /*
+  |--------------------------------------------------------------------------
+  | IZIN BLUETOOTH (ANDROID)
+  |--------------------------------------------------------------------------
+  |
+  | Diminta sekali begitu app pertama kali dibuka (bukan cuma pas user buka
+  | fitur cetak struk), supaya popup izin sudah muncul dari awal. Kalau di
+  | tolak di sini, tidak masalah -- print-receipt-modal.tsx tetap akan minta
+  | ulang saat user benar-benar mencoba cetak.
+  |
+  | Ini fire-and-forget, tidak perlu ditunggu (await) di sini karena tidak
+  | ada UI yang bergantung pada hasilnya saat startup.
+  |
+  |--------------------------------------------------------------------------
+  */
+
+  useEffect(() => {
+    requestBlePermissions();
+  }, []);
 
   if (isPending) {
     return (
