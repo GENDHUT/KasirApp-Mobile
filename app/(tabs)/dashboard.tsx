@@ -22,6 +22,13 @@ import { PrintReceiptModal } from "@/components/struk/print-receipt-modal";
 import { toReceiptOrder } from "@/lib/struk/receipt-mapper";
 import { type ReceiptOrder } from "@/lib/struk/receipt-types";
 
+import {
+  getPairedPrinters,
+  connectToPrinter,
+  printReceiptBytes,
+  requestBlePermissions,
+} from "@/lib/struk/thermal-printer";
+
 const PAGE_SIZE = 10;
 
 function formatCurrency(v: number) {
@@ -58,6 +65,10 @@ export default function DashboardScreen() {
       }
     | undefined;
 
+  // ---------------------------------------------------------------------------
+  // STATE
+  // ---------------------------------------------------------------------------
+
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
@@ -81,6 +92,12 @@ export default function DashboardScreen() {
   const [printModalVisible, setPrintModalVisible] = useState(false);
 
   // ---------------------------------------------------------------------------
+  // TEST PRINT
+  // ---------------------------------------------------------------------------
+
+  const [testingPrinter, setTestingPrinter] = useState(false);
+
+  // ---------------------------------------------------------------------------
   // LOAD HISTORY
   // ---------------------------------------------------------------------------
 
@@ -96,7 +113,7 @@ export default function DashboardScreen() {
 
       /*
        * Server dapat mengembalikan semua transaksi ketika user ADMIN.
-       * Dashboard tetap hanya menampilkan transaksi milik user yang login.
+       * Dashboard hanya menampilkan transaksi milik user yang login.
        */
       const ownOrders = orders.filter(
         (order) => order.userId === currentUser.id
@@ -129,6 +146,127 @@ export default function DashboardScreen() {
     setRefreshing(true);
     load();
   }
+
+  // ---------------------------------------------------------------------------
+  // TEST PRINT
+  // ---------------------------------------------------------------------------
+
+  const handleTestPrint = useCallback(async () => {
+    if (testingPrinter) return;
+
+    setTestingPrinter(true);
+
+    try {
+      /*
+       * 1. Request permission Bluetooth.
+       */
+      const granted = await requestBlePermissions();
+
+      if (!granted) {
+        Alert.alert(
+          "Izin Bluetooth Ditolak",
+          "Aplikasi membutuhkan izin Bluetooth untuk berkomunikasi dengan printer thermal."
+        );
+
+        return;
+      }
+
+      /*
+       * 2. Ambil daftar printer yang sudah di-pair.
+       */
+      const printers = await getPairedPrinters();
+
+      if (!printers || printers.length === 0) {
+        Alert.alert(
+          "Printer Belum Terhubung",
+          "Tidak ditemukan printer yang sudah di-pair. Silakan pair printer thermal melalui pengaturan Bluetooth Android terlebih dahulu."
+        );
+
+        return;
+      }
+
+      /*
+       * 3. Untuk sementara gunakan printer pertama.
+       */
+      const printer = printers[0];
+
+      /*
+       * 4. Connect ke printer.
+       */
+      await connectToPrinter(printer.address);
+
+      /*
+       * 5. Data test.
+       *
+       * Kita gunakan ESC/POS sederhana supaya lebih mirip
+       * dengan komunikasi printer thermal sebenarnya.
+       */
+      const testData = [
+        0x1b,
+        0x40, // INIT
+
+        0x1b,
+        0x61,
+        0x01, // CENTER
+
+        0x1b,
+        0x45,
+        0x01, // BOLD ON
+
+        ...Array.from(new TextEncoder().encode("TEST PRINT")),
+
+        0x1b,
+        0x45,
+        0x00, // BOLD OFF
+
+        0x0a,
+
+        ...Array.from(
+          new TextEncoder().encode("Printer berhasil terhubung")
+        ),
+
+        0x0a,
+
+        ...Array.from(
+          new TextEncoder().encode("KasirApp Thermal Printer")
+        ),
+
+        0x0a,
+        0x0a,
+        0x0a,
+        0x0a,
+
+        0x1d,
+        0x56,
+        0x00, // CUT
+      ];
+
+      /*
+       * 6. Kirim bytes ke printer.
+       */
+      await printReceiptBytes(
+        Uint8Array.from(testData)
+      );
+
+      Alert.alert(
+        "Test Print Berhasil",
+        `Data berhasil dikirim ke printer:\n\n${
+          printer.name || printer.address
+        }`
+      );
+    } catch (err) {
+      console.error("TEST PRINT ERROR:", err);
+
+      Alert.alert(
+        "Test Print Gagal",
+        err instanceof Error
+          ? err.message
+          : "Terjadi kesalahan saat mengirim data ke printer."
+      );
+    } finally {
+      setTestingPrinter(false);
+    }
+  }, [testingPrinter]);
 
   // ---------------------------------------------------------------------------
   // SUMMARY
@@ -171,8 +309,6 @@ export default function DashboardScreen() {
     Math.ceil(filteredOrders.length / PAGE_SIZE)
   );
 
-  // Jaga-jaga: kalau halaman aktif jadi tidak valid (mis. setelah refresh
-  // data berkurang), kembalikan ke halaman terakhir yang valid.
   useEffect(() => {
     if (page > totalPages) {
       setPage(totalPages);
@@ -181,20 +317,31 @@ export default function DashboardScreen() {
 
   const paginatedOrders = useMemo(() => {
     const start = (page - 1) * PAGE_SIZE;
-    return filteredOrders.slice(start, start + PAGE_SIZE);
+
+    return filteredOrders.slice(
+      start,
+      start + PAGE_SIZE
+    );
   }, [filteredOrders, page]);
 
   const rangeStart =
-    filteredOrders.length === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
+    filteredOrders.length === 0
+      ? 0
+      : (page - 1) * PAGE_SIZE + 1;
 
-  const rangeEnd = Math.min(page * PAGE_SIZE, filteredOrders.length);
+  const rangeEnd = Math.min(
+    page * PAGE_SIZE,
+    filteredOrders.length
+  );
 
   function goToPrevPage() {
     setPage((p) => Math.max(1, p - 1));
   }
 
   function goToNextPage() {
-    setPage((p) => Math.min(totalPages, p + 1));
+    setPage((p) =>
+      Math.min(totalPages, p + 1)
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -423,7 +570,8 @@ export default function DashboardScreen() {
                 },
               ]}
             >
-              @{currentUser?.username} • {currentUser?.email}
+              @{currentUser?.username} •{" "}
+              {currentUser?.email}
             </Text>
           </View>
         </View>
@@ -498,6 +646,151 @@ export default function DashboardScreen() {
                   ]}
                 >
                   Logout
+                </Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </View>
+
+        {/* ================================================================ */}
+        {/* PRINTER TEST CARD */}
+        {/* ================================================================ */}
+
+        <View
+          style={[
+            styles.printerCard,
+            {
+              backgroundColor: colors.card,
+              borderColor: colors.border,
+            },
+          ]}
+        >
+          <View style={styles.printerHeader}>
+            <View
+              style={[
+                styles.printerIcon,
+                {
+                  backgroundColor: colors.primary,
+                },
+              ]}
+            >
+              <Ionicons
+                name="print-outline"
+                size={20}
+                color={colors.bg}
+              />
+            </View>
+
+            <View style={styles.printerInfo}>
+              <Text
+                style={[
+                  styles.printerTitle,
+                  {
+                    color: colors.text,
+                  },
+                ]}
+              >
+                Printer Thermal
+              </Text>
+
+              <Text
+                style={[
+                  styles.printerSubtitle,
+                  {
+                    color: colors.subtext,
+                  },
+                ]}
+              >
+                Cek koneksi dan komunikasi printer
+              </Text>
+            </View>
+
+            <View
+              style={[
+                styles.bluetoothBadge,
+                {
+                  backgroundColor: colors.bg,
+                  borderColor: colors.border,
+                },
+              ]}
+            >
+              <Ionicons
+                name="bluetooth"
+                size={13}
+                color={colors.primary}
+              />
+            </View>
+          </View>
+
+          <View
+            style={[
+              styles.printerDivider,
+              {
+                backgroundColor: colors.border,
+              },
+            ]}
+          />
+
+          <Text
+            style={[
+              styles.printerDescription,
+              {
+                color: colors.subtext,
+              },
+            ]}
+          >
+            Pastikan printer thermal sudah di-pair
+            melalui Bluetooth Android sebelum melakukan
+            test print.
+          </Text>
+
+          <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={handleTestPrint}
+            disabled={testingPrinter}
+            style={[
+              styles.testPrintButton,
+              {
+                backgroundColor: colors.primary,
+                opacity: testingPrinter ? 0.65 : 1,
+              },
+            ]}
+          >
+            {testingPrinter ? (
+              <>
+                <ActivityIndicator
+                  size="small"
+                  color={colors.bg}
+                />
+
+                <Text
+                  style={[
+                    styles.testPrintButtonText,
+                    {
+                      color: colors.bg,
+                    },
+                  ]}
+                >
+                  Mengirim ke printer...
+                </Text>
+              </>
+            ) : (
+              <>
+                <Ionicons
+                  name="print-outline"
+                  size={17}
+                  color={colors.bg}
+                />
+
+                <Text
+                  style={[
+                    styles.testPrintButtonText,
+                    {
+                      color: colors.bg,
+                    },
+                  ]}
+                >
+                  Test Print
                 </Text>
               </>
             )}
@@ -715,7 +1008,9 @@ export default function DashboardScreen() {
           {search.length > 0 && (
             <TouchableOpacity
               activeOpacity={0.7}
-              onPress={() => handleChangeSearch("")}
+              onPress={() =>
+                handleChangeSearch("")
+              }
             >
               <Ionicons
                 name="close-circle"
@@ -782,7 +1077,7 @@ export default function DashboardScreen() {
         ) : (
           <>
             {/* ============================================================ */}
-            {/* HISTORY LIST (SATU HALAMAN SAJA) */}
+            {/* HISTORY LIST */}
             {/* ============================================================ */}
 
             <View style={styles.historyList}>
@@ -800,7 +1095,9 @@ export default function DashboardScreen() {
                   <TouchableOpacity
                     key={order.id}
                     activeOpacity={0.75}
-                    onPress={() => handleOpenPrint(order)}
+                    onPress={() =>
+                      handleOpenPrint(order)
+                    }
                     style={[
                       styles.historyRow,
                       {
@@ -810,6 +1107,7 @@ export default function DashboardScreen() {
                     ]}
                   >
                     {/* LEFT */}
+
                     <View style={styles.historyMain}>
                       <View style={styles.orderNumberRow}>
                         <Text
@@ -828,13 +1126,20 @@ export default function DashboardScreen() {
                           style={[
                             styles.statusPill,
                             {
-                              backgroundColor: "#16a34a",
+                              backgroundColor:
+                                "#16a34a",
                             },
                           ]}
                         >
-                          <View style={styles.statusDot} />
+                          <View
+                            style={styles.statusDot}
+                          />
 
-                          <Text style={styles.statusPillText}>
+                          <Text
+                            style={
+                              styles.statusPillText
+                            }
+                          >
                             SELESAI
                           </Text>
                         </View>
@@ -853,7 +1158,8 @@ export default function DashboardScreen() {
                             style={[
                               styles.metaText,
                               {
-                                color: colors.subtext,
+                                color:
+                                  colors.subtext,
                               },
                             ]}
                           >
@@ -873,11 +1179,13 @@ export default function DashboardScreen() {
                             style={[
                               styles.metaText,
                               {
-                                color: colors.subtext,
+                                color:
+                                  colors.subtext,
                               },
                             ]}
                           >
-                            {order.paymentMethod ?? "-"}
+                            {order.paymentMethod ??
+                              "-"}
                           </Text>
                         </View>
 
@@ -893,7 +1201,8 @@ export default function DashboardScreen() {
                             style={[
                               styles.metaText,
                               {
-                                color: colors.subtext,
+                                color:
+                                  colors.subtext,
                               },
                             ]}
                           >
@@ -904,6 +1213,7 @@ export default function DashboardScreen() {
                     </View>
 
                     {/* RIGHT */}
+
                     <View style={styles.historyRight}>
                       <Text
                         numberOfLines={1}
@@ -929,7 +1239,8 @@ export default function DashboardScreen() {
                           style={[
                             styles.printText,
                             {
-                              color: colors.primary,
+                              color:
+                                colors.primary,
                             },
                           ]}
                         >
@@ -958,11 +1269,13 @@ export default function DashboardScreen() {
                 <Text
                   style={[
                     styles.paginationInfo,
-                    { color: colors.subtext },
+                    {
+                      color: colors.subtext,
+                    },
                   ]}
                 >
-                  Menampilkan {rangeStart}-{rangeEnd} dari{" "}
-                  {filteredOrders.length} transaksi
+                  Menampilkan {rangeStart}-{rangeEnd}{" "}
+                  dari {filteredOrders.length} transaksi
                 </Text>
 
                 <View style={styles.paginationRow}>
@@ -973,9 +1286,12 @@ export default function DashboardScreen() {
                     style={[
                       styles.pageBtn,
                       {
-                        borderColor: colors.border,
-                        backgroundColor: colors.card,
-                        opacity: page === 1 ? 0.4 : 1,
+                        borderColor:
+                          colors.border,
+                        backgroundColor:
+                          colors.card,
+                        opacity:
+                          page === 1 ? 0.4 : 1,
                       },
                     ]}
                   >
@@ -990,15 +1306,19 @@ export default function DashboardScreen() {
                     style={[
                       styles.pageIndicator,
                       {
-                        borderColor: colors.border,
-                        backgroundColor: colors.card,
+                        borderColor:
+                          colors.border,
+                        backgroundColor:
+                          colors.card,
                       },
                     ]}
                   >
                     <Text
                       style={[
                         styles.pageIndicatorText,
-                        { color: colors.text },
+                        {
+                          color: colors.text,
+                        },
                       ]}
                     >
                       {page} / {totalPages}
@@ -1008,13 +1328,20 @@ export default function DashboardScreen() {
                   <TouchableOpacity
                     activeOpacity={0.7}
                     onPress={goToNextPage}
-                    disabled={page === totalPages}
+                    disabled={
+                      page === totalPages
+                    }
                     style={[
                       styles.pageBtn,
                       {
-                        borderColor: colors.border,
-                        backgroundColor: colors.card,
-                        opacity: page === totalPages ? 0.4 : 1,
+                        borderColor:
+                          colors.border,
+                        backgroundColor:
+                          colors.card,
+                        opacity:
+                          page === totalPages
+                            ? 0.4
+                            : 1,
                       },
                     ]}
                   >
@@ -1177,6 +1504,81 @@ const styles = StyleSheet.create({
   actionText: {
     fontSize: 12,
     fontWeight: "600",
+  },
+
+  // --------------------------------------------------------------------------
+  // PRINTER
+  // --------------------------------------------------------------------------
+
+  printerCard: {
+    borderWidth: 1,
+    borderRadius: 13,
+    padding: 12,
+    marginTop: 12,
+  },
+
+  printerHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+
+  printerIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 11,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  printerInfo: {
+    flex: 1,
+    minWidth: 0,
+    marginLeft: 10,
+  },
+
+  printerTitle: {
+    fontSize: 13,
+    fontWeight: "800",
+  },
+
+  printerSubtitle: {
+    fontSize: 10,
+    marginTop: 2,
+  },
+
+  bluetoothBadge: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    marginLeft: 8,
+  },
+
+  printerDivider: {
+    height: 1,
+    marginVertical: 11,
+  },
+
+  printerDescription: {
+    fontSize: 10,
+    lineHeight: 15,
+    marginBottom: 10,
+  },
+
+  testPrintButton: {
+    minHeight: 40,
+    borderRadius: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+  },
+
+  testPrintButtonText: {
+    fontSize: 12,
+    fontWeight: "800",
   },
 
   // --------------------------------------------------------------------------
